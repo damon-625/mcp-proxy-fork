@@ -39,7 +39,6 @@ type Client struct {
 	client          *client.Client
 	options         *OptionsV2
 	health          atomic.Int32
-	forwardHeaders  []string
 }
 
 func (c *Client) Health() clientHealth {
@@ -81,7 +80,7 @@ func streamableClientOptions(conf *StreamableMCPClientConfig) []transport.Stream
 	return options
 }
 
-func newMCPClient(name string, conf *MCPClientConfigV2, forwardHeaders []string) (*Client, error) {
+func newMCPClient(name string, conf *MCPClientConfigV2) (*Client, error) {
 	clientInfo, pErr := parseMCPClientConfigV2(conf)
 	if pErr != nil {
 		return nil, pErr
@@ -104,7 +103,6 @@ func newMCPClient(name string, conf *MCPClientConfigV2, forwardHeaders []string)
 			needPing:       true,
 			client:         mcpClient,
 			options:        conf.Options,
-			forwardHeaders: forwardHeaders,
 		}, nil
 	case *SSEMCPClientConfig:
 		if v.OAuth != nil {
@@ -123,7 +121,6 @@ func newMCPClient(name string, conf *MCPClientConfigV2, forwardHeaders []string)
 				needManualStart: true,
 				client:          mcpClient,
 				options:         conf.Options,
-				forwardHeaders:  forwardHeaders,
 			}, nil
 		}
 		options := sseClientOptions(v)
@@ -137,7 +134,6 @@ func newMCPClient(name string, conf *MCPClientConfigV2, forwardHeaders []string)
 			needManualStart: true,
 			client:          mcpClient,
 			options:         conf.Options,
-			forwardHeaders:  forwardHeaders,
 		}, nil
 	case *StreamableMCPClientConfig:
 		if v.OAuth != nil {
@@ -156,7 +152,6 @@ func newMCPClient(name string, conf *MCPClientConfigV2, forwardHeaders []string)
 				needManualStart: true,
 				client:          mcpClient,
 				options:         conf.Options,
-				forwardHeaders:  forwardHeaders,
 			}, nil
 		}
 		options := streamableClientOptions(v)
@@ -170,7 +165,6 @@ func newMCPClient(name string, conf *MCPClientConfigV2, forwardHeaders []string)
 			needManualStart: true,
 			client:          mcpClient,
 			options:         conf.Options,
-			forwardHeaders:  forwardHeaders,
 		}, nil
 	}
 	return nil, errors.New("invalid client type")
@@ -304,10 +298,6 @@ func (c *Client) addToolsToServer(ctx context.Context, mcpServer *server.MCPServ
 
 	// Create tool handler that injects forwarded headers into _meta
 	makeToolHandler := func(downstream func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error)) server.ToolHandlerFunc {
-		if len(c.forwardHeaders) == 0 {
-			// No headers to forward, use downstream directly
-			return downstream
-		}
 		return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			// Get forwarded headers from context
 			headers := ForwardedHeaders(ctx)
@@ -514,22 +504,14 @@ func newMCPServer(name string, serverConfig *MCPProxyConfigV2, clientConfig *MCP
 		streamableOpts := []server.StreamableHTTPOption{
 			server.WithStateLess(true),
 		}
-		// Add header forwarding: X-Tao-* prefix (always) + configured whitelist
+		// Auto-forward all X-Tao-* headers
 		streamableOpts = append(streamableOpts, server.WithHTTPContextFunc(
 			func(ctx context.Context, r *http.Request) context.Context {
 				headers := make(map[string]string)
-				// Auto-forward all X-Tao-* headers (no whitelist needed)
 				for name, values := range r.Header {
 					if strings.HasPrefix(name, "X-Tao-") && len(values) > 0 {
 						headers[name] = values[0]
 						slog.Debug("Forwarding X-Tao header", "header", name, "value", values[0])
-					}
-				}
-				// Also forward explicitly configured headers (whitelist)
-				for _, headerName := range serverConfig.ForwardHeaders {
-					if value := r.Header.Get(headerName); value != "" {
-						headers[headerName] = value
-						slog.Debug("Forwarding whitelisted header", "header", headerName, "value", value)
 					}
 				}
 				if len(headers) > 0 {

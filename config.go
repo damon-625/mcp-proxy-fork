@@ -177,10 +177,6 @@ type MCPProxyConfigV2 struct {
 	// StartupGracePeriod bounds how long /_readyz reports "initializing" while
 	// clients are still connecting. See startupGrace.
 	StartupGracePeriod Duration `json:"startupGracePeriod,omitempty"`
-	// ForwardHeaders is a list of HTTP header names to forward from incoming
-	// requests to the MCP server context. The headers are stored in the context
-	// and can be accessed by tool handlers via server.GetHTTPHeader(ctx, name).
-	ForwardHeaders []string `json:"forwardHeaders,omitempty"`
 }
 
 type MCPClientConfigV2 struct {
