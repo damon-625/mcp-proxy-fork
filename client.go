@@ -39,6 +39,7 @@ type Client struct {
 	client          *client.Client
 	options         *OptionsV2
 	health          atomic.Int32
+	forwardHeaders  []string
 }
 
 func (c *Client) Health() clientHealth {
@@ -80,7 +81,7 @@ func streamableClientOptions(conf *StreamableMCPClientConfig) []transport.Stream
 	return options
 }
 
-func newMCPClient(name string, conf *MCPClientConfigV2) (*Client, error) {
+func newMCPClient(name string, conf *MCPClientConfigV2, forwardHeaders []string) (*Client, error) {
 	clientInfo, pErr := parseMCPClientConfigV2(conf)
 	if pErr != nil {
 		return nil, pErr
@@ -99,10 +100,11 @@ func newMCPClient(name string, conf *MCPClientConfigV2) (*Client, error) {
 		// Stdio servers are pinged too: a crashed subprocess is the most
 		// common way a downstream disappears at runtime.
 		return &Client{
-			name:     name,
-			needPing: true,
-			client:   mcpClient,
-			options:  conf.Options,
+			name:           name,
+			needPing:       true,
+			client:         mcpClient,
+			options:        conf.Options,
+			forwardHeaders: forwardHeaders,
 		}, nil
 	case *SSEMCPClientConfig:
 		if v.OAuth != nil {
@@ -121,6 +123,7 @@ func newMCPClient(name string, conf *MCPClientConfigV2) (*Client, error) {
 				needManualStart: true,
 				client:          mcpClient,
 				options:         conf.Options,
+				forwardHeaders:  forwardHeaders,
 			}, nil
 		}
 		options := sseClientOptions(v)
@@ -134,6 +137,7 @@ func newMCPClient(name string, conf *MCPClientConfigV2) (*Client, error) {
 			needManualStart: true,
 			client:          mcpClient,
 			options:         conf.Options,
+			forwardHeaders:  forwardHeaders,
 		}, nil
 	case *StreamableMCPClientConfig:
 		if v.OAuth != nil {
@@ -152,6 +156,7 @@ func newMCPClient(name string, conf *MCPClientConfigV2) (*Client, error) {
 				needManualStart: true,
 				client:          mcpClient,
 				options:         conf.Options,
+				forwardHeaders:  forwardHeaders,
 			}, nil
 		}
 		options := streamableClientOptions(v)
@@ -165,6 +170,7 @@ func newMCPClient(name string, conf *MCPClientConfigV2) (*Client, error) {
 			needManualStart: true,
 			client:          mcpClient,
 			options:         conf.Options,
+			forwardHeaders:  forwardHeaders,
 		}, nil
 	}
 	return nil, errors.New("invalid client type")
@@ -296,6 +302,31 @@ func (c *Client) addToolsToServer(ctx context.Context, mcpServer *server.MCPServ
 		}
 	}
 
+	// Create tool handler that injects forwarded headers into _meta
+	makeToolHandler := func(downstream func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error)) server.ToolHandlerFunc {
+		if len(c.forwardHeaders) == 0 {
+			// No headers to forward, use downstream directly
+			return downstream
+		}
+		return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			// Get forwarded headers from context
+			headers := ForwardedHeaders(ctx)
+			if len(headers) > 0 {
+				// Ensure _meta exists
+				if request.Params.Meta == nil {
+					request.Params.Meta = &mcp.Meta{}
+				}
+				if request.Params.Meta.AdditionalFields == nil {
+					request.Params.Meta.AdditionalFields = make(map[string]any)
+				}
+				// Inject headers into _meta.headers
+				request.Params.Meta.AdditionalFields["headers"] = headers
+				slog.Debug("Injected headers into _meta", "client", c.name, "tool", request.Params.Name, "headers", headers)
+			}
+			return downstream(ctx, request)
+		}
+	}
+
 	for {
 		tools, err := c.client.ListTools(ctx, toolsRequest)
 		if err != nil {
@@ -311,7 +342,7 @@ func (c *Client) addToolsToServer(ctx context.Context, mcpServer *server.MCPServ
 		for _, tool := range tools.Tools {
 			if filterFunc(tool.Name) {
 				slog.Debug("Adding tool", "client", c.name, "tool", tool.Name)
-				mcpServer.AddTool(tool, c.client.CallTool)
+				mcpServer.AddTool(tool, makeToolHandler(c.client.CallTool))
 			}
 		}
 		if tools.NextCursor == "" {
@@ -433,6 +464,18 @@ type Server struct {
 	handler   http.Handler
 }
 
+// headerContextKey is the context key type for forwarded HTTP headers.
+type headerContextKey struct{}
+
+// ForwardedHeaders retrieves the forwarded HTTP headers from the context.
+// Returns nil if no headers were forwarded.
+func ForwardedHeaders(ctx context.Context) map[string]string {
+	if v := ctx.Value(headerContextKey{}); v != nil {
+		return v.(map[string]string)
+	}
+	return nil
+}
+
 func newMCPServer(name string, serverConfig *MCPProxyConfigV2, clientConfig *MCPClientConfigV2) (*Server, error) {
 	if serverConfig == nil {
 		return nil, errors.New("server config is required")
@@ -468,10 +511,34 @@ func newMCPServer(name string, serverConfig *MCPProxyConfigV2, clientConfig *MCP
 			server.WithBaseURL(serverConfig.BaseURL),
 		)
 	case MCPServerTypeStreamable:
-		handler = server.NewStreamableHTTPServer(
-			mcpServer,
+		streamableOpts := []server.StreamableHTTPOption{
 			server.WithStateLess(true),
-		)
+		}
+		// Add header forwarding: X-Tao-* prefix (always) + configured whitelist
+		streamableOpts = append(streamableOpts, server.WithHTTPContextFunc(
+			func(ctx context.Context, r *http.Request) context.Context {
+				headers := make(map[string]string)
+				// Auto-forward all X-Tao-* headers (no whitelist needed)
+				for name, values := range r.Header {
+					if strings.HasPrefix(name, "X-Tao-") && len(values) > 0 {
+						headers[name] = values[0]
+						slog.Debug("Forwarding X-Tao header", "header", name, "value", values[0])
+					}
+				}
+				// Also forward explicitly configured headers (whitelist)
+				for _, headerName := range serverConfig.ForwardHeaders {
+					if value := r.Header.Get(headerName); value != "" {
+						headers[headerName] = value
+						slog.Debug("Forwarding whitelisted header", "header", headerName, "value", value)
+					}
+				}
+				if len(headers) > 0 {
+					return context.WithValue(ctx, headerContextKey{}, headers)
+				}
+				return ctx
+			},
+		))
+		handler = server.NewStreamableHTTPServer(mcpServer, streamableOpts...)
 	default:
 		return nil, fmt.Errorf("unknown server type: %s", serverConfig.Type)
 	}

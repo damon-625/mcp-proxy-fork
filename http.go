@@ -246,7 +246,7 @@ func startHTTPServer(config *Config) error {
 			// Creating a stdio client already spawns the subprocess, so a
 			// missing command fails here rather than while connecting. Both
 			// have to obey the same panicIfInvalid policy.
-			mcpClient, err := newMCPClient(name, clientConfig)
+			mcpClient, err := newMCPClient(name, clientConfig, config.McpProxy.ForwardHeaders)
 			if err != nil {
 				return clientStartupError(name, clientConfig, err)
 			}

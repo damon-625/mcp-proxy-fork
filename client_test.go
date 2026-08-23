@@ -63,7 +63,7 @@ func TestMCPHTTPClientRequestsUncompressedResponses(t *testing.T) {
 		TransportType: MCPClientTypeStreamable,
 		URL:           server.URL,
 		Headers:       configuredHeaders,
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("newMCPClient: %v", err)
 	}
