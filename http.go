@@ -310,7 +310,12 @@ func startHTTPServer(config *Config) error {
 				if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
 					scheme = proto
 				}
-				fullResourceURL := fmt.Sprintf("%s://%s%s", scheme, r.Host, resourceURL)
+				// Check for X-Forwarded-Host header (common behind reverse proxies)
+				host := r.Host
+				if fwdHost := r.Header.Get("X-Forwarded-Host"); fwdHost != "" {
+					host = fwdHost
+				}
+				fullResourceURL := fmt.Sprintf("%s://%s%s", scheme, host, resourceURL)
 
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
