@@ -331,14 +331,9 @@ func startHTTPServer(config *Config) error {
 			}
 			for _, route := range wellKnownRoutes {
 				httpMux.HandleFunc(route, func(w http.ResponseWriter, r *http.Request) {
-					if !hasAuth {
-						// No auth configured - return 404 to indicate OAuth is not required
-						http.NotFound(w, r)
-						return
-					}
-					// Auth is configured - return proper RFC 9728 response
-					// Note: We would need to specify authorization_servers here for full compliance
-					// For now, this is a placeholder for future OAuth implementation
+					// RFC 9728: OAuth Protected Resource Metadata
+					// Always return 200 with resource URL - kiro-cli needs this to work
+					// The absence of authorization_servers indicates no OAuth is required
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusOK)
 					response := fmt.Sprintf(`{"resource":"%s"}`, buildResourceURL(r))
