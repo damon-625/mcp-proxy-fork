@@ -295,12 +295,28 @@ func startHTTPServer(config *Config) error {
 			httpMux.Handle(mcpRoute, chainMiddleware(server.handler, middlewares...))
 
 			// RFC 9728: OAuth Protected Resource Metadata endpoint
-			// Return empty JSON to indicate no OAuth is required
+			// Return minimal valid metadata to indicate no OAuth is required.
+			// Per RFC 9728, only "resource" is REQUIRED; "authorization_servers" is OPTIONAL.
+			// By omitting authorization_servers, we signal that no OAuth flow is needed.
 			wellKnownRoute := path.Join(mcpRoute, ".well-known", "oauth-protected-resource")
+			resourceURL := mcpRoute // capture for closure
 			httpMux.HandleFunc(wellKnownRoute, func(w http.ResponseWriter, r *http.Request) {
+				// Build the full resource URL from the request
+				scheme := "https"
+				if r.TLS == nil {
+					scheme = "http"
+				}
+				// Check for X-Forwarded-Proto header (common behind reverse proxies)
+				if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+					scheme = proto
+				}
+				fullResourceURL := fmt.Sprintf("%s://%s%s", scheme, r.Host, resourceURL)
+
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte("{}"))
+				// RFC 9728 compliant response: only "resource" field, no authorization_servers
+				response := fmt.Sprintf(`{"resource":"%s"}`, fullResourceURL)
+				_, _ = w.Write([]byte(response))
 			})
 			slog.Info("Registered well-known endpoint", "client", name, "route", wellKnownRoute)
 			return nil
