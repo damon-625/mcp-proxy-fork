@@ -499,10 +499,12 @@ func newMCPServer(name string, serverConfig *MCPProxyConfigV2, clientConfig *MCP
 			mcpServer,
 			server.WithStaticBasePath(name),
 			server.WithBaseURL(serverConfig.BaseURL),
+			server.WithSSEDisableLocalhostProtection(true), // Allow reverse proxy
 		)
 	case MCPServerTypeStreamable:
 		streamableOpts := []server.StreamableHTTPOption{
 			server.WithStateLess(true),
+			server.WithDisableLocalhostProtection(true), // Allow reverse proxy
 		}
 		// Auto-forward all X-Tao-* headers
 		streamableOpts = append(streamableOpts, server.WithHTTPContextFunc(
