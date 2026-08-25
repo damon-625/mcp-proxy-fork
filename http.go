@@ -294,36 +294,84 @@ func startHTTPServer(config *Config) error {
 			slog.Info("Handling requests", "client", name, "route", mcpRoute)
 			httpMux.Handle(mcpRoute, chainMiddleware(server.handler, middlewares...))
 
-			// RFC 9728: OAuth Protected Resource Metadata endpoint
-			// Return minimal valid metadata to indicate no OAuth is required.
-			// Per RFC 9728, only "resource" is REQUIRED; "authorization_servers" is OPTIONAL.
-			// By omitting authorization_servers, we signal that no OAuth flow is needed.
-			wellKnownRoute := path.Join(mcpRoute, ".well-known", "oauth-protected-resource")
+			// Helper to build resource URL from request
 			resourceURL := mcpRoute // capture for closure
-			httpMux.HandleFunc(wellKnownRoute, func(w http.ResponseWriter, r *http.Request) {
-				// Build the full resource URL from the request
+			buildResourceURL := func(r *http.Request) string {
 				scheme := "https"
 				if r.TLS == nil {
 					scheme = "http"
 				}
-				// Check for X-Forwarded-Proto header (common behind reverse proxies)
 				if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
 					scheme = proto
 				}
-				// Check for X-Forwarded-Host header (common behind reverse proxies)
 				host := r.Host
 				if fwdHost := r.Header.Get("X-Forwarded-Host"); fwdHost != "" {
 					host = fwdHost
 				}
-				fullResourceURL := fmt.Sprintf("%s://%s%s", scheme, host, resourceURL)
+				return fmt.Sprintf("%s://%s%s", scheme, host, resourceURL)
+			}
 
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				// RFC 9728 compliant response: only "resource" field, no authorization_servers
-				response := fmt.Sprintf(`{"resource":"%s"}`, fullResourceURL)
-				_, _ = w.Write([]byte(response))
-			})
-			slog.Info("Registered well-known endpoint", "client", name, "route", wellKnownRoute)
+			// MCP Authorization is OPTIONAL per spec (2025-06-18).
+			// For servers without authentication, we should NOT respond to
+			// oauth-protected-resource (return 404), signaling to clients that
+			// no OAuth is required.
+			//
+			// If AuthTokens are configured, we respond with proper RFC 9728 metadata.
+			// Otherwise, we return 404 for all well-known OAuth endpoints.
+			
+			hasAuth := len(clientConfig.Options.AuthTokens) > 0
+			
+			// RFC 9728: OAuth Protected Resource Metadata
+			// Kiro-cli tries multiple path patterns, so we register all of them:
+			// 1. /{serverName}/.well-known/oauth-protected-resource (standard)
+			// 2. /.well-known/oauth-protected-resource/{serverName} (kiro pattern)
+			wellKnownRoutes := []string{
+				path.Join(mcpRoute, ".well-known", "oauth-protected-resource"),
+				path.Join("/.well-known/oauth-protected-resource", name),
+			}
+			for _, route := range wellKnownRoutes {
+				httpMux.HandleFunc(route, func(w http.ResponseWriter, r *http.Request) {
+					if !hasAuth {
+						// No auth configured - return 404 to indicate OAuth is not required
+						http.NotFound(w, r)
+						return
+					}
+					// Auth is configured - return proper RFC 9728 response
+					// Note: We would need to specify authorization_servers here for full compliance
+					// For now, this is a placeholder for future OAuth implementation
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusOK)
+					response := fmt.Sprintf(`{"resource":"%s"}`, buildResourceURL(r))
+					_, _ = w.Write([]byte(response))
+				})
+				slog.Info("Registered oauth-protected-resource endpoint", "client", name, "route", route, "hasAuth", hasAuth)
+			}
+
+			// RFC 8414: OAuth Authorization Server Metadata
+			authServerRoutes := []string{
+				path.Join(mcpRoute, ".well-known", "oauth-authorization-server"),
+				path.Join("/.well-known/oauth-authorization-server", name),
+			}
+			for _, route := range authServerRoutes {
+				httpMux.HandleFunc(route, func(w http.ResponseWriter, r *http.Request) {
+					// Return 404 - no authorization server for this proxy
+					http.NotFound(w, r)
+				})
+				slog.Info("Registered oauth-authorization-server endpoint", "client", name, "route", route)
+			}
+
+			// OpenID Connect Discovery
+			openidRoutes := []string{
+				path.Join(mcpRoute, ".well-known", "openid-configuration"),
+				path.Join("/.well-known/openid-configuration", name),
+			}
+			for _, route := range openidRoutes {
+				httpMux.HandleFunc(route, func(w http.ResponseWriter, r *http.Request) {
+					// Return 404 - no OIDC for this proxy
+					http.NotFound(w, r)
+				})
+				slog.Info("Registered openid-configuration endpoint", "client", name, "route", route)
+			}
 			return nil
 		})
 	}
