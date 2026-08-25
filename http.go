@@ -293,6 +293,16 @@ func startHTTPServer(config *Config) error {
 			}
 			slog.Info("Handling requests", "client", name, "route", mcpRoute)
 			httpMux.Handle(mcpRoute, chainMiddleware(server.handler, middlewares...))
+
+			// RFC 9728: OAuth Protected Resource Metadata endpoint
+			// Return empty JSON to indicate no OAuth is required
+			wellKnownRoute := path.Join(mcpRoute, ".well-known", "oauth-protected-resource")
+			httpMux.HandleFunc(wellKnownRoute, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("{}"))
+			})
+			slog.Info("Registered well-known endpoint", "client", name, "route", wellKnownRoute)
 			return nil
 		})
 	}
